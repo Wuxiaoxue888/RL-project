@@ -30,9 +30,10 @@ class MahjongEnv(gym.Env):
 
         # Flag for if the game is running or not. Sets to true in the reset() function.
         self._game_running = False
-
-        # Stores the score for each player calculated at the end of the game. This array is used in _get_info() as auxiliary information
-        self._game_result = np.zeros(self._NUMBER_OF_PLAYERS)
+        # The player who got the winning combination. 0 means player 1 won, 1 means player 2 won,.... -1 means the game ended in a draw.
+        self._winner = None
+        # Stores the score for each player calculated at the end of the game.
+        self._scores = np.zeros(self._NUMBER_OF_PLAYERS)
 
         # Creates the deck, total: 108 cards (Cirles1-9, Lines1-9, Symbols1-9), 4 of each
         # Each unique card is represented as 0-26. The deck consists of four duplicates of each card: 27*4 = 108
@@ -77,13 +78,16 @@ class MahjongEnv(gym.Env):
 
         # Add methods to super class
         gym.Env.get_valid_actions = self.get_valid_actions
+        gym.Env.get_winner = self.get_winner
+        gym.Env.get_scores = self.get_scores
+        gym.Env.get_board = self.get_board
 
     def _get_obs(self):
         # Collects all visible cards on the board
         visible_cards = np.zeros(self._UNIQUE_CARDS, dtype=int)
         for player in range(self._NUMBER_OF_PLAYERS):
             visible_cards += self._board[player]["discarded"]
-            if player != self._player_turn:
+            if player != self._AI:
                 visible_cards += self._board[player]["pongs"] * 3
                 visible_cards += (self._board[player]["kangs"]%2) * 4
 
@@ -91,16 +95,25 @@ class MahjongEnv(gym.Env):
         assert np.max(visible_cards) <= self._DUPLICATES
 
         return {
-            "hand": self._board[self._player_turn]["hand"],
-            "pongs": self._board[self._player_turn]["pongs"],
-            "kangs": self._board[self._player_turn]["kangs"],
+            "hand": self._board[self._AI]["hand"],
+            "pongs": self._board[self._AI]["pongs"],
+            "kangs": self._board[self._AI]["kangs"],
             "visible cards": visible_cards
         }
     
     def _get_info(self):
         return {
             "": None
-        }    
+        }
+    
+    def get_winner(self):
+        return self._winner
+    
+    def get_scores(self):
+        return self._scores
+    
+    def get_board(self):
+        return self._board
     
     def _is_winning_combination(self, player: int, last_picked_card: int) -> int:
         """Check if a player has a winning combination
@@ -258,7 +271,7 @@ class MahjongEnv(gym.Env):
     
     def _calculate_kang_scores(self) -> list[float]:
         """Helper function that calculates the kang score for each player when the game has ended.
-        It is used by calculate_win_scores() and calculate_draw_scores()
+        It is used by _calculate_win_scores() and calculate_draw_scores()
         
         Returns:
         The number of points each player won or lost based on kangs.
@@ -266,18 +279,27 @@ class MahjongEnv(gym.Env):
         # The scores from kangs for each player
         kang_scores = np.zeros(self._NUMBER_OF_PLAYERS)
 
+        # List of if players are ready or not
+        ready_players = [self._is_ready(player) for player in range(self._NUMBER_OF_PLAYERS)]
+
         # Calculate the kang scores for each player
         for player in range(self._NUMBER_OF_PLAYERS):
-            kangs = self._board[player]["kangs"] - 1
-            # A multiplier that handles if kangs should increase or decrease a player's score depending on if the player is ready or not 
-            ready_multiplier = 1 if self._is_ready(player) else -1
+            kangs = self._board[player]["kangs"] - 1 # make the kangs zero-indexed
             for kang in kangs:
-                if kang == player: # player is responsible for his own kang
-                    kang_scores -= self._KANG_SCORE * ready_multiplier
-                    kang_scores[player] += self._KANG_SCORE * 4 * ready_multiplier
-                elif kang >= 0: # another player is responsible for the kang
-                    kang_scores[kang] -= self._KANG_SCORE * ready_multiplier
-                    kang_scores[player] += self._KANG_SCORE * ready_multiplier
+                if ready_players[player]: # if the player with the kang is ready
+                    if kang == player: # player is responsible for his own kang
+                        kang_scores -= self._KANG_SCORE # all players lose points
+                        kang_scores[player] += self._KANG_SCORE * 4 # the player with kang get points
+                    elif kang >= 0: # another player is responsible for the kang
+                        kang_scores[kang] -= self._KANG_SCORE # the responsible player loses points
+                        kang_scores[player] += self._KANG_SCORE # the player with the kang get points
+                else: # the player with the kang is not ready
+                    if kang == player: # player is responsible for his own kang
+                        kang_scores[np.bool_(ready_players)] += self._KANG_SCORE # ready players get points
+                        kang_scores[player] -= self._KANG_SCORE * len(np.nonzero(ready_players)[0]) # player loses points
+                    elif kang >= 0 and ready_players[kang]: # another player is responsible for the kang
+                        kang_scores[kang] += self._KANG_SCORE # the responsible player get points
+                        kang_scores[player] -= self._KANG_SCORE # the player with the kang loses points
 
         return kang_scores
     
@@ -335,8 +357,9 @@ class MahjongEnv(gym.Env):
             scores += ready_players
             scores[player] -= np.array(ready_players).sum()
         
-        # Add the kang scores
-        scores += self._calculate_kang_scores()
+        # Add the kang scores. If everyone is ready or no one is ready, kangs are not used
+        if any(ready_players) and not all(ready_players):
+            scores += self._calculate_kang_scores()
         
         return scores
 
@@ -390,7 +413,7 @@ class MahjongEnv(gym.Env):
 
     def get_valid_actions(self):
         return np.nonzero(self._board[self._player_turn]["hand"])[0]
-    
+        
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         # We need the following line to seed self.np_random | <- this comment and line is from the gymnasium documentation
         super().reset(seed=seed)
@@ -419,12 +442,12 @@ class MahjongEnv(gym.Env):
         # Sets the turn
         self._player_turn = self._AI
         # Give one extra card to player who starts
-        self._board[self._player_turn]["hand"][self._deck.pop()] += 1
+        self._board[self._AI]["hand"][self._deck.pop()] += 1
 
-        # Set flag
+        # Reset flag
         self._game_running = True
-        # Reset the game scores
-        self._game_result = np.zeros(self._NUMBER_OF_PLAYERS)
+        self._winner = None
+        self._scores = np.zeros(self._NUMBER_OF_PLAYERS)
 
         observation = self._get_obs()
         info = self._get_info()
@@ -447,13 +470,15 @@ class MahjongEnv(gym.Env):
             # A player can only take the discarded card if they need it for a special winning combination or if they have a kang.
             if (combination_score > self._BASIC_WIN_SCORE) or (combination_score and self._board[player]["kang"].sum() > 0):
                 # A player takes the discarded card and gets a winning combination
+                self._board[player]["hand"][discarded_card] += 1
                 self._game_running = False
-                self._player_turn = player # Set turn to the player who won
                 # Return
                 terminated = True
                 truncated = False
-                self._game_result = self._calculate_win_scores(self._player_turn, combination_score, self._player_turn)
-                reward = self._game_result[self._AI]
+                self._scores = self._calculate_win_scores(player, combination_score, self._player_turn)
+                reward = self._scores[self._AI]
+                self._player_turn = player # Set turn to the player who takes the discarded card
+                self._winner = player
                 observation = self._get_obs()
                 info = self._get_info()
                 return observation, reward, terminated, truncated, info
@@ -465,18 +490,17 @@ class MahjongEnv(gym.Env):
 
             # If a player has two or more of the discarded card he can take it
             if self._board[player]["hand"][discarded_card] >= 2:
-                self._player_turn = player # Set turn to the player who takes the discarded card
                 if self._board[player]["hand"][discarded_card] == 3 and len(self._deck) > 0: # kang (but is only allowed if there is at least one card left in the deck)
                     # Remove the cards from the hand and set the kang. (the 3 cards from the hand and the discarded card form the kang)
                     self._board[player]["hand"][discarded_card] -= 3
-                    self._board[player]["kangs"][discarded_card] = 1 # set the kang
+                    self._board[player]["kangs"][discarded_card] = self._player_turn+1 # set the kang
 
                     # Give the player who kanged an extra card (since 4 cards is used for the "kang family")
                     dealt_card = self._deck.pop()
-                    self._board[self._player_turn]["hand"][dealt_card] += 1
+                    self._board[player]["hand"][dealt_card] += 1
 
                     # Check if the player has won after being dealt the card
-                    combination_score = self._is_winning_combination(self._player_turn, dealt_card)
+                    combination_score = self._is_winning_combination(player, dealt_card)
                     self._game_running = not combination_score
                 else: # pong
                     # Remove the cards from the hand and set the pong. (the 2 cards from the hand and the discarded card form the pong)
@@ -487,10 +511,12 @@ class MahjongEnv(gym.Env):
                 terminated = not self._game_running
                 truncated = False
                 if terminated:
-                    self._game_result = self._calculate_win_scores(self._player_turn, combination_score, self._player_turn)
-                    reward = self._game_result[self._AI]
+                    self._winner = player
+                    self._scores = self._calculate_win_scores(player, combination_score, self._player_turn)
+                    reward = self._scores[self._AI]
                 else:
                     reward = self._get_intermediate_reward(self._AI)
+                self._player_turn = player # Set turn to the player who takes the discarded card
                 observation = self._get_obs()
                 info = self._get_info()
                 if terminated or self._player_turn == self._AI:
@@ -520,8 +546,13 @@ class MahjongEnv(gym.Env):
         terminated = not self._game_running
         truncated = False
         if terminated:
-            self._game_result = self._calculate_win_scores(self._player_turn, combination_score, self._player_turn) if combination_score else self._calculate_draw_scores()
-            reward = self._game_result[self._AI]
+            if combination_score:
+                self._winner = self._player_turn
+                self._scores = self._calculate_win_scores(self._player_turn, combination_score, self._player_turn)
+            else:
+                self._winner = -1 # draw
+                self._scores = self._calculate_draw_scores()
+            reward = self._scores[self._AI]
         else:
             reward = self._get_intermediate_reward(self._AI)
         observation = self._get_obs()
@@ -533,6 +564,6 @@ class MahjongEnv(gym.Env):
             return self.step(np.random.choice(self.get_valid_actions()))
     
 gym.register(
-    id="Mahjong-v0",
+    id="Mahjong-v1",
     entry_point=MahjongEnv,
 )
