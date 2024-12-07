@@ -269,18 +269,17 @@ class MahjongEnv(gym.Env):
 
         return 0
     
-    def _calculate_kang_scores(self) -> list[float]:
+    def _calculate_kang_scores(self, ready_players) -> list[float]:
         """Helper function that calculates the kang score for each player when the game has ended.
         It is used by _calculate_win_scores() and calculate_draw_scores()
         
+        Parameters:
+        ready_player - list of if the players are ready or not
         Returns:
         The number of points each player won or lost based on kangs.
         """
         # The scores from kangs for each player
         kang_scores = np.zeros(self._NUMBER_OF_PLAYERS)
-
-        # List of if players are ready or not
-        ready_players = [self._is_ready(player) for player in range(self._NUMBER_OF_PLAYERS)]
 
         # Calculate the kang scores for each player
         for player in range(self._NUMBER_OF_PLAYERS):
@@ -327,8 +326,11 @@ class MahjongEnv(gym.Env):
             scores[responsible_player] -= combination_score
             scores[winning_player] += combination_score
         
+        # List of if players are ready or not
+        ready_players = [True if player == winning_player else self._is_ready(player) for player in range(self._NUMBER_OF_PLAYERS)]
+
         # Add the kang scores
-        scores += self._calculate_kang_scores()
+        scores += self._calculate_kang_scores(ready_players)
         
         return scores
     
@@ -359,7 +361,7 @@ class MahjongEnv(gym.Env):
         
         # Add the kang scores. If everyone is ready or no one is ready, kangs are not used
         if any(ready_players) and not all(ready_players):
-            scores += self._calculate_kang_scores()
+            scores += self._calculate_kang_scores(ready_players)
         
         return scores
 
@@ -413,6 +415,25 @@ class MahjongEnv(gym.Env):
 
     def get_valid_actions(self):
         return np.nonzero(self._board[self._player_turn]["hand"])[0]
+
+    def get_reasonable_action(self) -> int:
+        """This method returns a reasonably good action. 
+        It works by looping through all possible actions and ranking them based on calling the _get_intermediate_reward() function.
+        """
+        hand = self._board[self._player_turn]["hand"]
+        all_actions = np.nonzero(hand)[0]
+        np.random.shuffle(all_actions) # The actions are shuffled to avoid "lower card" actions being returned more often.
+        best_action = None
+        best_score = -1 # the best action has the highest score
+        for action in all_actions:
+            hand[action] -= 1
+            score = self._get_intermediate_reward(self._player_turn)
+            hand[action] += 1
+            if score > best_score:
+                best_action = action
+                best_score = score
+
+        return best_action
         
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         # We need the following line to seed self.np_random | <- this comment and line is from the gymnasium documentation
@@ -522,7 +543,7 @@ class MahjongEnv(gym.Env):
                 if terminated or self._player_turn == self._AI:
                     return observation, reward, terminated, truncated, info
                 else:
-                    return self.step(np.random.choice(self.get_valid_actions()))
+                    return self.step(self.get_reasonable_action())
 
         # Add to the player's discarded cards
         self._board[self._player_turn]["discarded"][discarded_card] += 1
@@ -561,9 +582,9 @@ class MahjongEnv(gym.Env):
         if terminated or self._player_turn == self._AI:
             return observation, reward, terminated, truncated, info
         else:
-            return self.step(np.random.choice(self.get_valid_actions()))
+            return self.step(self.get_reasonable_action())
     
 gym.register(
-    id="Mahjong-v1",
+    id="Mahjong-v2",
     entry_point=MahjongEnv,
 )
