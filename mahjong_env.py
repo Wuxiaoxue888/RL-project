@@ -25,7 +25,7 @@ class MahjongEnv(gym.Env):
         self._LEVEL_3_WIN_SCORE = 60
         self._KANG_SCORE = 3
 
-        # Set which player will be the AI. The other three players will take automatic random actions until it is the AI's turn again
+        # Set which player will be the AI. The other three players will take automatic actions until it is the AI's turn again
         self._AI = 0
 
         # Flag for if the game is running or not. Sets to true in the reset() function.
