@@ -5,7 +5,7 @@ import gymnasium as gym
 
 class MahjongEnv(gym.Env):
     """Custom gym environment class for Mahjong.
-    Create an instance of the environemnet by calling "gym.make("Mahjong-v0")".
+    Create an instance of the environemnet by calling "gym.make("Mahjong-v2")".
     
     Methods:
     get_valid_actions()
